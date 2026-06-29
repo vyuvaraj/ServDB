@@ -14,3 +14,4 @@ This roadmap outlines the planned development phases for the ServDB database pro
 - [x] **Query analytics** — CPU cost and pattern aggregation. [June 29, 2026]
 - [x] **Query caching** — Invalidation caching via ServCache. [June 29, 2026]
 - [x] **Centralized migrations** — Centralized schema migration runner. [June 29, 2026]
+- [x] **Database health** — Active lease counts and deadlock alert telemetry. [June 29, 2026]

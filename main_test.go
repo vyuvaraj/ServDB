@@ -203,7 +203,10 @@ func TestServDBMigrations(t *testing.T) {
 	}
 
 	// 2. Post same migration again -> should skip (status: skipped)
-	resp2, _ := http.Post(testServer.URL+"/api/db/migrate", "application/json", bytes.NewReader(body))
+	resp2, err := http.Post(testServer.URL+"/api/db/migrate", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("failed duplicate migration request: %v", err)
+	}
 	defer resp2.Body.Close()
 
 	if resp2.StatusCode != http.StatusOK {
@@ -286,5 +289,44 @@ func TestServDBQueryCaching(t *testing.T) {
 	replicaPool.mu.Unlock()
 	if queriesRunAfter != 1 {
 		t.Errorf("expected connection pool queries run to be 1 after invalidation, got %d", queriesRunAfter)
+	}
+}
+
+func TestServDBHealth(t *testing.T) {
+	primaryPool = NewConnectionPool(2, "postgres")
+	replicaPool = NewConnectionPool(2, "postgres")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/db/health", handleDbHealth)
+
+	testServer := httptest.NewServer(mux)
+	defer testServer.Close()
+
+	// 1. Check healthy stats
+	resp, err := http.Get(testServer.URL + "/api/db/health")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("failed to query health: %v", err)
+	}
+	var res map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&res)
+	resp.Body.Close()
+
+	if res["status"] != "healthy" || res["deadlock_alert"].(bool) != false {
+		t.Errorf("unexpected healthy payload: %+v", res)
+	}
+
+	// 2. Lease connections to max -> should trigger deadlock alert
+	c1, _ := primaryPool.Acquire()
+	c2, _ := primaryPool.Acquire()
+	defer primaryPool.Release(c1)
+	defer primaryPool.Release(c2)
+
+	resp2, _ := http.Get(testServer.URL + "/api/db/health")
+	var res2 map[string]interface{}
+	json.NewDecoder(resp2.Body).Decode(&res2)
+	resp2.Body.Close()
+
+	if res2["deadlock_alert"].(bool) != true {
+		t.Errorf("expected deadlock alert to be true when pool is full, got false")
 	}
 }

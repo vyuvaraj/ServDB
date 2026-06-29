@@ -174,6 +174,7 @@ func main() {
 	mux.HandleFunc("/api/db/analytics", handleAnalytics)
 	mux.HandleFunc("/api/db/migrate", handleMigrate)
 	mux.HandleFunc("/api/db/cache/clear", handleClearCache)
+	mux.HandleFunc("/api/db/health", handleDbHealth)
 
 	serverHandler := ServShared.AuthMiddleware(mux)
 
@@ -383,4 +384,31 @@ func handleClearCache(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"success","message":"Query cache invalidated successfully"}`))
+}
+
+func handleDbHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	primaryStats := primaryPool.Stats()
+	replicaStats := replicaPool.Stats()
+
+	deadlockAlert := false
+	if primaryStats.ActiveConnections >= primaryStats.MaxConnections {
+		deadlockAlert = true
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "healthy",
+		"pools": map[string]interface{}{
+			"primary": primaryStats,
+			"replica": replicaStats,
+		},
+		"deadlock_alert": deadlockAlert,
+		"active_leases":  primaryStats.ActiveConnections + replicaStats.ActiveConnections,
+	})
 }
