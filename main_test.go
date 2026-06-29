@@ -167,3 +167,55 @@ func TestServDBSlowQueryAndAnalytics(t *testing.T) {
 		t.Errorf("unexpected query metric values: %+v", metric)
 	}
 }
+
+func TestServDBMigrations(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/db/migrate", handleMigrate)
+
+	testServer := httptest.NewServer(mux)
+	defer testServer.Close()
+
+	// 1. Post a migration SQL execution request
+	payload := map[string]interface{}{
+		"version": 1,
+		"name":    "create_users_table",
+		"sql":     "CREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100));",
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(testServer.URL+"/api/db/migrate", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("migration post failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected StatusCreated, got %d", resp.StatusCode)
+	}
+
+	var res struct {
+		Status    string    `json:"status"`
+		Migration Migration `json:"migration"`
+	}
+	json.NewDecoder(resp.Body).Decode(&res)
+
+	if res.Status != "success" || res.Migration.Version != 1 || res.Migration.Name != "create_users_table" {
+		t.Errorf("invalid migration response: %+v", res)
+	}
+
+	// 2. Post same migration again -> should skip (status: skipped)
+	resp2, _ := http.Post(testServer.URL+"/api/db/migrate", "application/json", bytes.NewReader(body))
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("expected StatusOK for skipped migration, got %d", resp2.StatusCode)
+	}
+
+	var res2 struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	json.NewDecoder(resp2.Body).Decode(&res2)
+	if res2.Status != "skipped" {
+		t.Errorf("expected status 'skipped' for duplicate migration, got %q", res2.Status)
+	}
+}

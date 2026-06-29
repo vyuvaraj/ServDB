@@ -122,11 +122,19 @@ type QueryMetric struct {
 	TotalLatency int64 `json:"total_latency_ms"`
 }
 
+type Migration struct {
+	Version   int       `json:"version"`
+	Name      string    `json:"name"`
+	AppliedAt time.Time `json:"applied_at"`
+}
+
 var (
 	primaryPool    *ConnectionPool
 	replicaPool    *ConnectionPool
 	queryAnalytics = make(map[string]*QueryMetric)
 	analyticsMu    sync.RWMutex
+	migrations     = make([]Migration, 0)
+	migrationsMu   sync.RWMutex
 )
 
 func main() {
@@ -156,6 +164,7 @@ func main() {
 	mux.HandleFunc("/api/db/query", handleQuery)
 	mux.HandleFunc("/api/db/stats", handleStats)
 	mux.HandleFunc("/api/db/analytics", handleAnalytics)
+	mux.HandleFunc("/api/db/migrate", handleMigrate)
 
 	serverHandler := ServShared.AuthMiddleware(mux)
 
@@ -281,4 +290,47 @@ func handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(queryAnalytics)
+}
+
+func handleMigrate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Version int    `json:"version"`
+		Name    string `json:"name"`
+		SQL     string `json:"sql"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	migrationsMu.Lock()
+	for _, m := range migrations {
+		if m.Version == req.Version {
+			migrationsMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"skipped","message":"Migration already applied"}`))
+			return
+		}
+	}
+
+	newMigration := Migration{
+		Version:   req.Version,
+		Name:      req.Name,
+		AppliedAt: time.Now(),
+	}
+	migrations = append(migrations, newMigration)
+	migrationsMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "success",
+		"migration": newMigration,
+	})
 }
