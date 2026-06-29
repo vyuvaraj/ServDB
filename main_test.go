@@ -119,3 +119,51 @@ func TestServDBDialectValidation(t *testing.T) {
 		t.Errorf("expected StatusOK for valid Postgres placeholder, got %d", resp2.StatusCode)
 	}
 }
+
+func TestServDBSlowQueryAndAnalytics(t *testing.T) {
+	primaryPool = NewConnectionPool(1, "postgres")
+	replicaPool = NewConnectionPool(1, "postgres")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/db/query", handleQuery)
+	mux.HandleFunc("/api/db/analytics", handleAnalytics)
+
+	testServer := httptest.NewServer(mux)
+	defer testServer.Close()
+
+	// 1. Run a query containing 'sleep' to trigger a slow query log
+	reqPayload := QueryRequest{Query: "SELECT sleep(2) FROM dual;"}
+	body, _ := json.Marshal(reqPayload)
+	resp, err := http.Post(testServer.URL+"/api/db/query", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected StatusOK for slow query, got %d", resp.StatusCode)
+	}
+
+	// 2. Fetch analytics
+	analResp, err := http.Get(testServer.URL + "/api/db/analytics")
+	if err != nil {
+		t.Fatalf("failed to get analytics: %v", err)
+	}
+	defer analResp.Body.Close()
+
+	if analResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected analytics StatusOK, got %d", analResp.StatusCode)
+	}
+
+	var metrics map[string]QueryMetric
+	json.NewDecoder(analResp.Body).Decode(&metrics)
+
+	metric, exists := metrics["SELECT sleep(2) FROM dual;"]
+	if !exists {
+		t.Fatalf("expected metric to exist for query signature")
+	}
+
+	if metric.Count != 1 || metric.TotalLatency < 100 {
+		t.Errorf("unexpected query metric values: %+v", metric)
+	}
+}

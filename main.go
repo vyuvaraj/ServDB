@@ -117,9 +117,16 @@ func (p *ConnectionPool) Stats() PoolStats {
 	}
 }
 
+type QueryMetric struct {
+	Count        int64 `json:"count"`
+	TotalLatency int64 `json:"total_latency_ms"`
+}
+
 var (
-	primaryPool *ConnectionPool
-	replicaPool *ConnectionPool
+	primaryPool    *ConnectionPool
+	replicaPool    *ConnectionPool
+	queryAnalytics = make(map[string]*QueryMetric)
+	analyticsMu    sync.RWMutex
 )
 
 func main() {
@@ -148,6 +155,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/db/query", handleQuery)
 	mux.HandleFunc("/api/db/stats", handleStats)
+	mux.HandleFunc("/api/db/analytics", handleAnalytics)
 
 	serverHandler := ServShared.AuthMiddleware(mux)
 
@@ -205,9 +213,31 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	defer targetPool.Release(conn)
 
-	// Simulate brief query processing latency
-	time.Sleep(10 * time.Millisecond)
+	// Simulate query processing latency
+	if strings.Contains(strings.ToLower(req.Query), "sleep") {
+		time.Sleep(110 * time.Millisecond)
+	} else {
+		time.Sleep(10 * time.Millisecond)
+	}
 	targetPool.IncrementQueries()
+
+	durationMs := time.Since(start).Milliseconds()
+
+	// Slow query detection
+	if durationMs > 100 {
+		log.Printf("[DATABASE_ALERT] Slow query detected in ServDB: %q (duration: %dms)", req.Query, durationMs)
+	}
+
+	// Update query analytics
+	analyticsMu.Lock()
+	metric, exists := queryAnalytics[req.Query]
+	if !exists {
+		metric = &QueryMetric{}
+		queryAnalytics[req.Query] = metric
+	}
+	metric.Count++
+	metric.TotalLatency += durationMs
+	analyticsMu.Unlock()
 
 	// Simulated query output rows
 	rows := []map[string]interface{}{
@@ -237,4 +267,18 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(res)
+}
+
+func handleAnalytics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	analyticsMu.RLock()
+	defer analyticsMu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(queryAnalytics)
 }

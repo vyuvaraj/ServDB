@@ -10,8 +10,7 @@ This roadmap outlines the planned development phases for the ServDB database pro
 - [x] **Multi-database support** — Multi-dialect parser backend support. [June 29, 2026]
 - [x] **Serv-lang integration** — Centralized client driver connection pool setup. [June 29, 2026]
 
-## Phase 2: Analytics & Performance Optimization
-- [ ] **Slow query detection** — Slow query profiling telemetry.
-- [ ] **Query analytics** — CPU cost and pattern aggregation.
+- [x] **Slow query detection** — Slow query profiling telemetry. [June 29, 2026]
+- [x] **Query analytics** — CPU cost and pattern aggregation. [June 29, 2026]
 - [ ] **Query caching** — Invalidation caching via ServCache.
 - [ ] **Centralized migrations** — Centralized schema migration runner.
