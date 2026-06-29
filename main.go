@@ -128,6 +128,12 @@ type Migration struct {
 	AppliedAt time.Time `json:"applied_at"`
 }
 
+type CachedResult struct {
+	Rows      []map[string]interface{} `json:"rows"`
+	CachedAt  time.Time                `json:"cached_at"`
+	ExpiresAt time.Time                `json:"expires_at"`
+}
+
 var (
 	primaryPool    *ConnectionPool
 	replicaPool    *ConnectionPool
@@ -135,6 +141,8 @@ var (
 	analyticsMu    sync.RWMutex
 	migrations     = make([]Migration, 0)
 	migrationsMu   sync.RWMutex
+	queryCache     = make(map[string]CachedResult)
+	queryCacheMu   sync.RWMutex
 )
 
 func main() {
@@ -165,6 +173,7 @@ func main() {
 	mux.HandleFunc("/api/db/stats", handleStats)
 	mux.HandleFunc("/api/db/analytics", handleAnalytics)
 	mux.HandleFunc("/api/db/migrate", handleMigrate)
+	mux.HandleFunc("/api/db/cache/clear", handleClearCache)
 
 	serverHandler := ServShared.AuthMiddleware(mux)
 
@@ -214,6 +223,22 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if targetName == "replica" {
+		queryCacheMu.RLock()
+		cached, found := queryCache[req.Query]
+		queryCacheMu.RUnlock()
+		if found && cached.ExpiresAt.After(time.Now()) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(QueryResponse{
+				Status:   "success",
+				Rows:     cached.Rows,
+				Duration: time.Since(start).Milliseconds(),
+			})
+			return
+		}
+	}
+
 	// Acquire mock pooled database connection handle
 	conn, err := targetPool.Acquire()
 	if err != nil {
@@ -251,6 +276,16 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 	// Simulated query output rows
 	rows := []map[string]interface{}{
 		{"id": 1, "query": req.Query, "status": "executed", "conn_id": conn.ID, "pool": targetName},
+	}
+
+	if targetName == "replica" {
+		queryCacheMu.Lock()
+		queryCache[req.Query] = CachedResult{
+			Rows:      rows,
+			CachedAt:  time.Now(),
+			ExpiresAt: time.Now().Add(5 * time.Second),
+		}
+		queryCacheMu.Unlock()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -333,4 +368,19 @@ func handleMigrate(w http.ResponseWriter, r *http.Request) {
 		"status":    "success",
 		"migration": newMigration,
 	})
+}
+
+func handleClearCache(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	queryCacheMu.Lock()
+	queryCache = make(map[string]CachedResult)
+	queryCacheMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"success","message":"Query cache invalidated successfully"}`))
 }

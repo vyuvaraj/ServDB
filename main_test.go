@@ -219,3 +219,72 @@ func TestServDBMigrations(t *testing.T) {
 		t.Errorf("expected status 'skipped' for duplicate migration, got %q", res2.Status)
 	}
 }
+
+func TestServDBQueryCaching(t *testing.T) {
+	primaryPool = NewConnectionPool(5, "postgres")
+	replicaPool = NewConnectionPool(5, "postgres")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/db/query", handleQuery)
+	mux.HandleFunc("/api/db/cache/clear", handleClearCache)
+
+	testServer := httptest.NewServer(mux)
+	defer testServer.Close()
+
+	// 1. Fire SELECT query -> should fetch from DB and save to cache
+	queryPayload := map[string]string{"query": "SELECT * FROM products;"}
+	body, _ := json.Marshal(queryPayload)
+	resp, err := http.Post(testServer.URL+"/api/db/query", "application/json", bytes.NewReader(body))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("first SELECT failed: %v", err)
+	}
+	var res1 QueryResponse
+	json.NewDecoder(resp.Body).Decode(&res1)
+	resp.Body.Close()
+
+	if len(res1.Rows) == 0 {
+		t.Fatalf("expected rows returned")
+	}
+	connID1 := res1.Rows[0]["conn_id"].(float64)
+
+	// Reset replica query counts to check if connection pool is bypassed
+	replicaPool.mu.Lock()
+	replicaPool.totalQueries = 0
+	replicaPool.mu.Unlock()
+
+	// 2. Fire identical SELECT query again -> should hit cache, bypassing database connection acquire
+	resp2, _ := http.Post(testServer.URL+"/api/db/query", "application/json", bytes.NewReader(body))
+	var res2 QueryResponse
+	json.NewDecoder(resp2.Body).Decode(&res2)
+	resp2.Body.Close()
+
+	connID2 := res2.Rows[0]["conn_id"].(float64)
+	if connID1 != connID2 {
+		t.Errorf("expected same connection ID context from cached rows")
+	}
+
+	replicaPool.mu.Lock()
+	queriesRun := replicaPool.totalQueries
+	replicaPool.mu.Unlock()
+	if queriesRun != 0 {
+		t.Errorf("expected connection pool queries run to be 0 (bypassed via cache), got %d", queriesRun)
+	}
+
+	// 3. Clear cache
+	clearResp, err := http.Post(testServer.URL+"/api/db/cache/clear", "application/json", nil)
+	if err != nil || clearResp.StatusCode != http.StatusOK {
+		t.Fatalf("clear cache failed: %v", err)
+	}
+	clearResp.Body.Close()
+
+	// 4. Run SELECT query again -> should acquire connection again
+	resp3, _ := http.Post(testServer.URL+"/api/db/query", "application/json", bytes.NewReader(body))
+	resp3.Body.Close()
+
+	replicaPool.mu.Lock()
+	queriesRunAfter := replicaPool.totalQueries
+	replicaPool.mu.Unlock()
+	if queriesRunAfter != 1 {
+		t.Errorf("expected connection pool queries run to be 1 after invalidation, got %d", queriesRunAfter)
+	}
+}
