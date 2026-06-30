@@ -145,6 +145,39 @@ var (
 	queryCacheMu   sync.RWMutex
 )
 
+var storeClient *ServShared.StoreClient
+
+func initStore() {
+	storeClient = ServShared.NewStoreClient()
+	loadMigrationsFromStore()
+}
+
+func loadMigrationsFromStore() {
+	if data, err := storeClient.Get("serv-db-migrations", "migrations.json"); err == nil {
+		migrationsMu.Lock()
+		var loadedMigrations []Migration
+		if json.Unmarshal(data, &loadedMigrations) == nil {
+			migrations = loadedMigrations
+			log.Printf("[PERSISTENCE] Loaded %d migrations from ServStore", len(migrations))
+		}
+		migrationsMu.Unlock()
+	} else {
+		log.Printf("[PERSISTENCE] Failed to load migrations (will use default/empty): %v", err)
+	}
+}
+
+func saveMigrationsToStore() {
+	if storeClient == nil {
+		return
+	}
+	migrationsMu.RLock()
+	data, err := json.Marshal(migrations)
+	migrationsMu.RUnlock()
+	if err == nil {
+		_ = storeClient.Put("serv-db-migrations", "migrations.json", data)
+	}
+}
+
 func main() {
 	portStr := flag.String("port", "8097", "ServDB server port")
 	maxConns := flag.Int("max_conns", 10, "Maximum connection pool size")
@@ -158,6 +191,8 @@ func main() {
 
 	primaryPool = NewConnectionPool(*maxConns, *dialectStr)
 	replicaPool = NewConnectionPool(*maxConns, *dialectStr)
+
+	initStore()
 
 	mux := http.NewServeMux()
 
@@ -362,6 +397,7 @@ func handleMigrate(w http.ResponseWriter, r *http.Request) {
 	}
 	migrations = append(migrations, newMigration)
 	migrationsMu.Unlock()
+	saveMigrationsToStore()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
