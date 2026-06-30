@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/vyuvaraj/ServShared"
@@ -158,11 +162,11 @@ func loadMigrationsFromStore() {
 		var loadedMigrations []Migration
 		if json.Unmarshal(data, &loadedMigrations) == nil {
 			migrations = loadedMigrations
-			log.Printf("[PERSISTENCE] Loaded %d migrations from ServStore", len(migrations))
+			ServShared.LogJSON(nil, "info", fmt.Sprintf("Loaded %d migrations from ServStore", len(migrations)))
 		}
 		migrationsMu.Unlock()
 	} else {
-		log.Printf("[PERSISTENCE] Failed to load migrations (will use default/empty): %v", err)
+		ServShared.LogJSON(nil, "warn", fmt.Sprintf("Failed to load migrations (will use default/empty): %v", err))
 	}
 }
 
@@ -211,12 +215,35 @@ func main() {
 	mux.HandleFunc("/api/db/cache/clear", handleClearCache)
 	mux.HandleFunc("/api/db/health", handleDbHealth)
 
-	serverHandler := ServShared.AuthMiddleware(mux)
+	serverHandler := ServShared.TraceMiddleware("servdb", ServShared.AuthMiddleware(mux))
 
-	log.Printf("ServDB connection pooler starting on port %s", port)
-	if err := http.ListenAndServe(":"+port, serverHandler); err != nil {
-		log.Fatalf("failed to start ServDB: %v", err)
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: serverHandler,
 	}
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("[INFO] ServDB connection pooler starting on port %s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("failed to start ServDB: %v", err)
+		}
+	}()
+
+	<-stop
+
+	log.Println("[INFO] Shutting down ServDB server...")
+	ServShared.Shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("Server shutdown failed: %v", err)
+	}
+	log.Println("[INFO] ServDB server exited cleanly")
 }
 
 func handleQuery(w http.ResponseWriter, r *http.Request) {
@@ -295,7 +322,7 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Slow query detection
 	if durationMs > 100 {
-		log.Printf("[DATABASE_ALERT] Slow query detected in ServDB: %q (duration: %dms)", req.Query, durationMs)
+		ServShared.LogJSON(r, "warn", fmt.Sprintf("Slow query detected in ServDB: %q (duration: %dms)", req.Query, durationMs))
 	}
 
 	// Update query analytics
