@@ -15,3 +15,10 @@ This roadmap outlines the planned development phases for the ServDB database pro
 - [x] **Query caching** — Invalidation caching via ServCache. [June 29, 2026]
 - [x] **Centralized migrations** — Centralized schema migration runner. [June 29, 2026]
 - [x] **Database health** — Active lease counts and deadlock alert telemetry. [June 29, 2026]
+
+## Phase 2: Production Hardening & Resilience (Completed)
+- [x] **State-Isolated Unit & Validation Tests** — Table-driven checks for dialect mismatch placeholders and connection routing. [June 30, 2026]
+- [x] **Cache Access Benchmarks** — Performance evaluation tests for read-heavy cache queries. [June 30, 2026]
+- [x] **Interface Abstractions & Decoupled Storage** — Extract connection pool logic behind `PoolManager` and migrations behind `NewServer` config injection. [June 30, 2026]
+- [x] **Structured Logging & OTel Tracing** — Add TraceMiddleware for tracing context propagation and JSON log format. [June 30, 2026]
+- [x] **SIGTERM Graceful Shutdown** — Register listener to shut down HTTP listener cleanly with a 5-second timeout. [June 30, 2026]
