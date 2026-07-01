@@ -25,6 +25,9 @@ type Server struct {
 
 	queryCache   map[string]CachedResult
 	queryCacheMu sync.RWMutex
+
+	peers   []string
+	peersMu sync.RWMutex
 }
 
 func NewServer(primary, replica PoolManager, store *ServShared.StoreClient) *Server {
@@ -35,6 +38,7 @@ func NewServer(primary, replica PoolManager, store *ServShared.StoreClient) *Ser
 		queryAnalytics: make(map[string]*QueryMetric),
 		migrations:     make([]Migration, 0),
 		queryCache:     make(map[string]CachedResult),
+		peers:          make([]string, 0),
 	}
 	srv.loadMigrationsFromStore()
 	return srv
@@ -166,6 +170,10 @@ func (srv *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		srv.queryCacheMu.Unlock()
 	}
 
+	if targetName == "primary" && r.Header.Get("X-ServDB-Replicated") != "true" {
+		srv.replicateQuery(req.Query)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(QueryResponse{
@@ -173,6 +181,39 @@ func (srv *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		Rows:     rows,
 		Duration: durationMs,
 	})
+}
+
+func (srv *Server) SetPeers(peers []string) {
+	srv.peersMu.Lock()
+	defer srv.peersMu.Unlock()
+	srv.peers = peers
+}
+
+func (srv *Server) replicateQuery(query string) {
+	srv.peersMu.RLock()
+	peers := make([]string, len(srv.peers))
+	copy(peers, srv.peers)
+	srv.peersMu.RUnlock()
+
+	for _, peer := range peers {
+		go func(addr string) {
+			if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+				addr = "http://" + addr
+			}
+			payload := map[string]string{"query": query}
+			bodyBytes, _ := json.Marshal(payload)
+			req, err := http.NewRequest("POST", addr+"/api/db/query", strings.NewReader(string(bodyBytes)))
+			if err == nil {
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-ServDB-Replicated", "true")
+				client := &http.Client{Timeout: 5 * time.Second}
+				resp, err := client.Do(req)
+				if err == nil {
+					resp.Body.Close()
+				}
+			}
+		}(peer)
+	}
 }
 
 func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {

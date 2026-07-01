@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -43,6 +44,7 @@ func main() {
 	portStr := flag.String("port", "8097", "ServDB server port")
 	maxConns := flag.Int("max_conns", 10, "Maximum connection pool size")
 	dialectStr := flag.String("dialect", "postgres", "Database dialect (postgres, mysql)")
+	peersStr := flag.String("peers", "", "Comma-separated list of database peer addresses")
 	flag.Parse()
 
 	port := os.Getenv("PORT")
@@ -56,6 +58,17 @@ func main() {
 	storeClient := ServShared.NewStoreClient()
 
 	srv := NewServer(primaryPool, replicaPool, storeClient)
+
+	var peers []string
+	if *peersStr != "" {
+		peers = strings.Split(*peersStr, ",")
+	} else if envPeers := os.Getenv("SERVDB_PEERS"); envPeers != "" {
+		peers = strings.Split(envPeers, ",")
+	}
+	for i, p := range peers {
+		peers[i] = strings.TrimSpace(p)
+	}
+	srv.SetPeers(peers)
 
 	mux := http.NewServeMux()
 

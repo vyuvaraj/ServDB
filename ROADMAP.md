@@ -26,4 +26,5 @@ This roadmap outlines the planned development phases for the ServDB database pro
 ## Phase 3: Architectural Depth (Pending)
 - [x] **Ecosystem Performance Suite** — Multi-tiered Go micro-benchmarks, k6 component load tests, and distributed end-to-end telemetry workloads (OPS.7)
 - [x] **Dynamic Connection Pool Tuning** — Adaptive pool sizing and automated invalidation invalidations (PS.1)
+- [x] **Dynamic Active-Active Cluster Replication** — Multi-leader query statement replication across peers (HA.1) [July 1, 2026]
 - [ ] **Secrets Envelope Key Rotation** — Secret KMS rotation schedule & API key hashing (SEC.8)

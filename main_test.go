@@ -542,3 +542,53 @@ func BenchmarkConnectionPoolAcquireRelease(b *testing.B) {
 		}
 	})
 }
+
+func TestDatabaseQueryReplication(t *testing.T) {
+	primaryPool1 := NewConnectionPool(2, "postgres")
+	replicaPool1 := NewConnectionPool(2, "postgres")
+	srv1 := NewServer(primaryPool1, replicaPool1, nil)
+	mux1 := http.NewServeMux()
+	mux1.HandleFunc("/api/db/query", srv1.handleQuery)
+	server1 := httptest.NewServer(mux1)
+	defer server1.Close()
+
+	primaryPool2 := NewConnectionPool(2, "postgres")
+	replicaPool2 := NewConnectionPool(2, "postgres")
+	srv2 := NewServer(primaryPool2, replicaPool2, nil)
+	mux2 := http.NewServeMux()
+	var queryReplicatedMutex sync.Mutex
+	var replicatedQueryString string
+	mux2.HandleFunc("/api/db/query", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-ServDB-Replicated") == "true" {
+			var req QueryRequest
+			json.NewDecoder(r.Body).Decode(&req)
+			queryReplicatedMutex.Lock()
+			replicatedQueryString = req.Query
+			queryReplicatedMutex.Unlock()
+		}
+		srv2.handleQuery(w, r)
+	})
+	server2 := httptest.NewServer(mux2)
+	defer server2.Close()
+
+	srv1.SetPeers([]string{server2.URL})
+
+	reqPayload := QueryRequest{Query: "INSERT INTO users (name) VALUES ('alice');"}
+	body, _ := json.Marshal(reqPayload)
+	resp, err := http.Post(server1.URL+"/api/db/query", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	queryReplicatedMutex.Lock()
+	gotQuery := replicatedQueryString
+	queryReplicatedMutex.Unlock()
+
+	expectedQuery := "INSERT INTO users (name) VALUES ('alice');"
+	if gotQuery != expectedQuery {
+		t.Errorf("expected replicated query %q, got %q", expectedQuery, gotQuery)
+	}
+}
