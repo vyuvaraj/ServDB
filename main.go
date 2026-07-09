@@ -40,6 +40,11 @@ type StatsResponse struct {
 	Replica PoolStats `json:"replica"`
 }
 
+// Enterprise hooks (overridden in EE build)
+var (
+	EnterpriseListenAndServeTLS = func(srv *http.Server, certFile, keyFile string) error { return nil }
+)
+
 func main() {
 	portStr := flag.String("port", "8097", "ServDB server port")
 	maxConns := flag.Int("max_conns", 10, "Maximum connection pool size")
@@ -116,9 +121,18 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("[INFO] ServDB connection pooler starting on port %s", port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("failed to start ServDB: %v", err)
+		certFile := os.Getenv("SERVDB_TLS_CERT")
+		keyFile := os.Getenv("SERVDB_TLS_KEY")
+		if certFile != "" && keyFile != "" {
+			log.Printf("[INFO] ServDB starting with TLS on port %s", port)
+			if err := EnterpriseListenAndServeTLS(server, certFile, keyFile); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("failed to start ServDB: %v", err)
+			}
+		} else {
+			log.Printf("[INFO] ServDB connection pooler starting on port %s", port)
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("failed to start ServDB: %v", err)
+			}
 		}
 	}()
 
