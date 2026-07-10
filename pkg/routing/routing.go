@@ -33,12 +33,16 @@ type StatsResponse struct {
 	Replica pool.PoolStats `json:"replica"`
 }
 
-// Enterprise hooks (overridden in EE build).
-var (
-	EnterpriseRouteQuery = func(srv *Server, query string, region string) (pool.Manager, string) {
-		return nil, ""
-	}
-)
+// QueryOptimizer defines dynamic hooks for query routing and caching (e.g. read/write splitting, region routing, cache validation).
+type QueryOptimizer interface {
+	Route(srv *Server, query string, region string) (pool.Manager, string)
+	GetCached(query string) ([]map[string]interface{}, bool)
+	SetCached(query string, rows []map[string]interface{})
+	ClearCache()
+}
+
+// ActiveQueryOptimizer is the globally registered query routing/caching optimizer.
+var ActiveQueryOptimizer QueryOptimizer
 
 // Server is the central ServDB request handler.
 type Server struct {
@@ -56,9 +60,6 @@ type Server struct {
 	migrations   []migration.Migration
 	migrationsMu sync.RWMutex
 
-	queryCache   map[string]analytics.CachedResult
-	queryCacheMu sync.RWMutex
-
 	peers   []string
 	peersMu sync.RWMutex
 
@@ -75,7 +76,6 @@ func NewServer(primary, replica pool.Manager, store *ServShared.StoreClient) *Se
 		storeClient:    store,
 		queryAnalytics: make(map[string]*analytics.QueryMetric),
 		migrations:     make([]migration.Migration, 0),
-		queryCache:     make(map[string]analytics.CachedResult),
 		peers:          make([]string, 0),
 		activeTables:   make(map[string]bool),
 	}
@@ -169,13 +169,26 @@ func (srv *Server) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 
+	if ActiveQueryOptimizer != nil {
+		if cachedRows, found := ActiveQueryOptimizer.GetCached(req.Query); found {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(QueryResponse{
+				Status:   "success",
+				Rows:     cachedRows,
+				Duration: time.Since(start).Milliseconds(),
+			})
+			return
+		}
+	}
+
 	var targetPool pool.Manager
 	var targetName string
 
-	if ep, name := EnterpriseRouteQuery(srv, req.Query, r.Header.Get("X-Region")); ep != nil {
-		targetPool = ep
-		targetName = name
-	} else {
+	if ActiveQueryOptimizer != nil {
+		targetPool, targetName = ActiveQueryOptimizer.Route(srv, req.Query, r.Header.Get("X-Region"))
+	}
+	if targetPool == nil {
 		targetPool = srv.primaryPool
 		targetName = "primary"
 	}
@@ -191,22 +204,6 @@ func (srv *Server) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":"dialect_mismatch","message":"MySQL dialect requires '?' placeholders, found '$1'"}`))
 		return
-	}
-
-	if targetName == "replica" {
-		srv.queryCacheMu.RLock()
-		cached, found := srv.queryCache[req.Query]
-		srv.queryCacheMu.RUnlock()
-		if found && cached.ExpiresAt.After(time.Now()) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(QueryResponse{
-				Status:   "success",
-				Rows:     cached.Rows,
-				Duration: time.Since(start).Milliseconds(),
-			})
-			return
-		}
 	}
 
 	conn, err := targetPool.Acquire()
@@ -242,14 +239,8 @@ func (srv *Server) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		{"id": 1, "query": req.Query, "status": "executed", "conn_id": conn.ID, "pool": targetName},
 	}
 
-	if targetName == "replica" {
-		srv.queryCacheMu.Lock()
-		srv.queryCache[req.Query] = analytics.CachedResult{
-			Rows:      rows,
-			CachedAt:  time.Now(),
-			ExpiresAt: time.Now().Add(5 * time.Second),
-		}
-		srv.queryCacheMu.Unlock()
+	if ActiveQueryOptimizer != nil {
+		ActiveQueryOptimizer.SetCached(req.Query, rows)
 	}
 
 	if targetName == "primary" && r.Header.Get("X-ServDB-Replicated") != "true" {
@@ -440,9 +431,9 @@ func (srv *Server) HandleClearCache(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	srv.queryCacheMu.Lock()
-	srv.queryCache = make(map[string]analytics.CachedResult)
-	srv.queryCacheMu.Unlock()
+	if ActiveQueryOptimizer != nil {
+		ActiveQueryOptimizer.ClearCache()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"success","message":"Query cache invalidated successfully"}`))

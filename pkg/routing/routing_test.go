@@ -171,3 +171,62 @@ func TestRoutingHandleMigrateInvalidJSON(t *testing.T) {
 		t.Errorf("expected 400 Bad Request, got %d", rr.Code)
 	}
 }
+
+type mockQueryOptimizer struct {
+	routeCalled bool
+	getCachedCalled bool
+	setCachedCalled bool
+	clearCacheCalled bool
+}
+
+func (m *mockQueryOptimizer) Route(srv *Server, query string, region string) (pool.Manager, string) {
+	m.routeCalled = true
+	return srv.primaryPool, "primary"
+}
+
+func (m *mockQueryOptimizer) GetCached(query string) ([]map[string]interface{}, bool) {
+	m.getCachedCalled = true
+	return nil, false
+}
+
+func (m *mockQueryOptimizer) SetCached(query string, rows []map[string]interface{}) {
+	m.setCachedCalled = true
+}
+
+func (m *mockQueryOptimizer) ClearCache() {
+	m.clearCacheCalled = true
+}
+
+func TestPluggableQueryOptimizer(t *testing.T) {
+	mockOpt := &mockQueryOptimizer{}
+	ActiveQueryOptimizer = mockOpt
+	defer func() { ActiveQueryOptimizer = nil }()
+
+	primary := &mockPool{dialectVal: "postgres"}
+	replica := &mockPool{dialectVal: "postgres"}
+	srv := NewServer(primary, replica, nil)
+
+	body, _ := json.Marshal(QueryRequest{Query: "SELECT 1;"})
+	req := httptest.NewRequest("POST", "/api/db/query", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	srv.HandleQuery(rr, req)
+
+	if !mockOpt.routeCalled {
+		t.Error("expected Route to be called")
+	}
+	if !mockOpt.getCachedCalled {
+		t.Error("expected GetCached to be called")
+	}
+	if !mockOpt.setCachedCalled {
+		t.Error("expected SetCached to be called")
+	}
+
+	clearReq := httptest.NewRequest("POST", "/api/db/cache/clear", nil)
+	clearRR := httptest.NewRecorder()
+	srv.HandleClearCache(clearRR, clearReq)
+
+	if !mockOpt.clearCacheCalled {
+		t.Error("expected ClearCache to be called")
+	}
+}
