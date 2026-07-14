@@ -162,3 +162,45 @@ func TestPoolExhaustionAndRecovery(t *testing.T) {
 		p.Release(c3)
 	}
 }
+
+// TestConnectionLeakDetection verifies that the pool janitor reclaims a connection
+// that was acquired but never released (simulating a client crash / leak).
+func TestConnectionLeakDetection(t *testing.T) {
+	// Set a very short checkout timeout so the janitor reclaims quickly
+	t.Setenv("SERVDB_CONN_TIMEOUT", "100ms")
+
+	p := NewConnectionPool(1, "sqlite")
+	defer p.Shutdown(context.Background())
+
+	// Acquire the only connection and intentionally never release it (leak)
+	leaked, err := p.Acquire()
+	if err != nil {
+		t.Fatalf("failed to acquire connection: %v", err)
+	}
+
+	// Verify the connection is active
+	if p.Stats().ActiveConnections != 1 {
+		t.Fatalf("expected 1 active connection after acquire, got %d", p.Stats().ActiveConnections)
+	}
+
+	_ = leaked // intentionally not released
+
+	// Wait for the janitor to reclaim the timed-out lease (timeout=100ms, janitor ticks every 100ms)
+	time.Sleep(400 * time.Millisecond)
+
+	stats := p.Stats()
+	if stats.ActiveConnections != 0 {
+		t.Errorf("expected 0 active connections after janitor reclaim, got %d", stats.ActiveConnections)
+	}
+
+	// A new Acquire should now succeed because the connection was returned to idle
+	recovered, err := p.Acquire()
+	if err != nil {
+		t.Fatalf("expected successful acquire after janitor reclaim, got: %v", err)
+	}
+	if recovered.ID != leaked.ID {
+		t.Errorf("expected reclaimed connection ID %d, got %d", leaked.ID, recovered.ID)
+	}
+	p.Release(recovered)
+}
+
